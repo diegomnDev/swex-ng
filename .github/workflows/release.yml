@@ -1,0 +1,66 @@
+name: Release
+
+# Tag a version (e.g. `git tag v0.1.0 && git push origin v0.1.0`) to build,
+# sign the updater payload, and publish a GitHub Release with the DMG + the
+# `latest.json` the in-app updater reads.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: macos-14
+    permissions:
+      contents: write # needed to create the Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure cmake (aws-lc-sys needs it)
+        run: brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both slices for the universal (arm64 + Intel) binary.
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build, sign updater & publish Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing (NOT Apple signing). Set these as repo secrets.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "SWEX-NG ${{ github.ref_name }}"
+          releaseBody: |
+            Native macOS (Apple Silicon + Intel) build of SWEX-NG.
+
+            **Install:** download the `.dmg`, drag to Applications. It's **unsigned**,
+            so on first launch right-click the app → **Open** (or run
+            `xattr -dr com.apple.quarantine /Applications/SWEX-NG.app`). Future updates
+            install in-app automatically, no re-warning.
+
+            **What changed:** see [CHANGELOG.md](https://github.com/diegomnDev/swex-ng/blob/main/CHANGELOG.md).
+          releaseDraft: false
+          prerelease: false
+          # Universal macOS binary. If aws-lc-sys ever fights the cross-compile,
+          # fall back to: --target aarch64-apple-darwin
+          args: --target universal-apple-darwin

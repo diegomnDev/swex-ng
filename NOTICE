@@ -1,0 +1,24 @@
+SWEX-NG
+Copyright 2026 diegomnDev
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this project except in compliance with the License. You may obtain a copy of the
+License in the LICENSE file or at http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------------
+
+This product includes software and data derived from Summoner's War Exporter
+("sw-exporter") by Xzandro and contributors, licensed under the Apache License,
+Version 2.0:
+
+    https://github.com/Xzandro/sw-exporter
+
+Specifically:
+  * The game data tables in `src-tauri/mapping.json` are derived from that
+    project's `app/mapping.js`.
+  * The protocol and mapping behaviour reimplemented in `src-tauri/src/`
+    (decode, proxy capture rules, monster/rune helpers) is derived from that
+    project's `app/proxy/` and `app/mapping.js` modules.
+
+The AES decryption key is NOT included in this project. It is the property of the
+game's publisher and must be supplied by the end user from their own installation.

@@ -1,0 +1,23 @@
+# Node
+node_modules/
+dist/
+*.log
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# macOS
+.DS_Store
+
+# OMC / agent orchestration state
+.omc/
+
+# secrets — never commit the decryption key or signing keys
+key.hex
+.env
+src-tauri/.env
+*.key.hex
+# Tauri updater signing private key (lives only in CI secrets)
+*.tauri.key
+swex-ng-updater.key
