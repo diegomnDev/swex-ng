@@ -24,7 +24,7 @@ jobs:
           # Both slices for the universal (arm64 + Intel) binary.
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9
 
