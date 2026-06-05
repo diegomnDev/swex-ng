@@ -2,6 +2,7 @@ mod cert;
 mod decode;
 mod macos;
 mod mapping;
+mod profile;
 mod proxy;
 
 use std::net::SocketAddr;

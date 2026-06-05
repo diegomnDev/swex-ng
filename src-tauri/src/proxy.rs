@@ -92,7 +92,7 @@ impl HttpHandler for SwHandler {
         // Decrypt a copy; the original bytes are forwarded to the game intact.
         let text = String::from_utf8_lossy(&bytes);
         match decrypt_response(&self.key, &text) {
-            Ok(json) => self.handle_command(&json),
+            Ok(json) => self.handle_command(json),
             Err(e) => self.log("debug", format!("decrypt failed (ignored): {e}")),
         }
 
@@ -103,7 +103,7 @@ impl HttpHandler for SwHandler {
 }
 
 impl SwHandler {
-    fn handle_command(&self, json: &serde_json::Value) {
+    fn handle_command(&self, mut json: serde_json::Value) {
         let command = json.get("command").and_then(|c| c.as_str()).unwrap_or("");
         if command == "HubUserLogin" || command == "GuestLogin" {
             // profile-export.js checks building_list presence for completeness.
@@ -114,22 +114,34 @@ impl SwHandler {
                 );
                 return;
             }
-            let wizard = json.get("wizard_info");
-            let wid = wizard
-                .and_then(|w| w.get("wizard_id"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let wname = wizard
-                .and_then(|w| w.get("wizard_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("profile");
-            let safe: String = wname
-                .chars()
-                .filter(|c| !"/\\:*?\"<>|".contains(*c))
-                .collect();
-            let filename = format!("{safe}-{wid}.json");
+            // Own the wizard fields so the immutable borrow of `json` ends here,
+            // before we take it mutably for `sort_user_data` below.
+            let (wid, wname) = {
+                let wizard = json.get("wizard_info");
+                let wid = wizard
+                    .and_then(|w| w.get("wizard_id"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let wname = wizard
+                    .and_then(|w| w.get("wizard_name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("profile")
+                    .to_string();
+                (wid, wname)
+            };
+            // Same as sw-exporter: sanitize the whole `name-id` then add `.json`.
+            let filename = format!(
+                "{}.json",
+                crate::profile::sanitize_filename(&format!("{wname}-{wid}"))
+            );
             let path = self.out_dir.join(&filename);
-            match serde_json::to_vec_pretty(json) {
+
+            // Match sw-exporter's `sortUserData` (its ProfileExport plugin runs
+            // this by default): normalize com2us's object-shaped rune lists into
+            // arrays and apply the in-game ordering before writing.
+            crate::profile::sort_user_data(&mut json);
+
+            match serde_json::to_vec_pretty(&json) {
                 Ok(buf) => {
                     if let Err(e) = std::fs::write(&path, buf) {
                         self.log("error", format!("Could not write {filename}: {e}"));
