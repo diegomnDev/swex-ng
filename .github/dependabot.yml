@@ -1,6 +1,10 @@
 version: 2
 # Opens PRs to bump dependencies. CI validates each PR; merging to main does NOT
 # create a release — releases only happen on a `v*` tag. So this never auto-versions.
+#
+# Major bumps are IGNORED on purpose (they tend to break builds, e.g. TypeScript 6,
+# plugin-react 5). You bump majors by hand when you choose to. Only minor/patch
+# updates get auto-PRs here.
 updates:
   - package-ecosystem: cargo
     directory: /src-tauri
@@ -9,6 +13,9 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(rust)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /
@@ -17,6 +24,9 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(js)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
@@ -24,3 +34,6 @@ updates:
       interval: weekly
     commit-message:
       prefix: "deps(ci)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
