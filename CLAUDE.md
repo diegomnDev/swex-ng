@@ -61,8 +61,45 @@ Mapping/protocol tests assert **parity with the original** (values computed from
 
 ## Release
 
-Tag `v*` (`git tag v0.1.0 && git push --tags`) → `.github/workflows/release.yml` builds the
-universal (arm64 + Intel) DMG, signs the updater artifacts, and publishes the GitHub
-Release + `latest.json`. Keep the version in sync across `package.json`,
-`src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. After a local rebuild, replace
-`/Applications/SWEX-NG.app` to test the fresh build.
+Tagging `v*` (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers
+`.github/workflows/release.yml`, which builds the universal (arm64 + Intel) DMG, signs the
+updater artifacts, and publishes the GitHub Release + `latest.json` (the in-app updater reads
+this). Releases are **unsigned** by Apple; the updater payload IS signed with the Tauri key.
+
+Do the steps below **in order** — the tag must point at the commit that already carries the
+bumped version and changelog, or the published Release won't match.
+
+1. **Green CI gate locally** (the same checks `ci.yml` runs — a red tag still publishes a
+   broken Release):
+   ```bash
+   cargo fmt   --manifest-path src-tauri/Cargo.toml --check
+   cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+   cargo test  --manifest-path src-tauri/Cargo.toml --lib
+   pnpm exec tsc --noEmit
+   ```
+2. **Bump the version in all FOUR files** (they must stay in sync):
+   `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and the `swex-ng`
+   package entry in `src-tauri/Cargo.lock` (else the next build rewrites the lock and dirties
+   the tree).
+3. **Update `CHANGELOG.md`** — the Release body links to it, so it must be current. Add a
+   `## [X.Y.Z] - YYYY-MM-DD` section (Keep a Changelog format: Added/Changed/Fixed), point the
+   `[Unreleased]` compare link at the new tag, and add the `[X.Y.Z]: …/releases/tag/vX.Y.Z`
+   ref.
+4. **Commit + push to `main`** (branch protection requires the `check` status to pass — push
+   the bump, let CI go green, only then tag).
+5. **Tag + push the tag:** `git tag vX.Y.Z && git push origin vX.Y.Z`. Watch the run with
+   `gh run watch` / verify the Release at `gh release view vX.Y.Z`.
+
+Required repo secrets for `release.yml`: `TAURI_SIGNING_PRIVATE_KEY` **and**
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the local key in `~/.swex-ng-keys/updater.key` has an
+**empty** password). `GITHUB_TOKEN` is provided automatically.
+
+To build + deploy a signed copy locally (e.g. to test before tagging), the updater signing env
+vars must be set or `pnpm tauri build` fails with *"no private key"*:
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.swex-ng-keys/updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+pnpm tauri build
+rm -rf /Applications/SWEX-NG.app
+cp -R src-tauri/target/release/bundle/macos/SWEX-NG.app /Applications/SWEX-NG.app
+```

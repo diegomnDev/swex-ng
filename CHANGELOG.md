@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-06
+
+### Fixed
+- Profile export now matches sw-exporter's `sortUserData`. The game's PHP backend sometimes
+  serializes rune lists as JSON **objects** keyed by arbitrary integers instead of arrays
+  (com2us quirk); these are now coerced to arrays via the same `Object.values` logic as the
+  original. `unit_list`, equipped/inventory runes, and `rune_craft_item_list` are sorted to the
+  in-game order. Combined with `serde_json`'s `preserve_order` (server key order is preserved
+  instead of alphabetized), exported profiles are now structurally identical to the original
+  Summoners War Exporter. Verified live against a real capture.
+
+[0.1.1]: https://github.com/diegomnDev/swex-ng/releases/tag/v0.1.1
+
 ## [0.1.0] - 2026-06-05
 
 First public release. Native macOS, no Electron, no Rosetta.
@@ -22,5 +35,5 @@ First public release. Native macOS, no Electron, no Rosetta.
 - Ported `mapping.js` helpers: `monster_name`, `rune_efficiency` (ancient-aware), with
   tests asserting parity against the original.
 
-[Unreleased]: https://github.com/diegomnDev/swex-ng/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/diegomnDev/swex-ng/compare/v0.1.1...HEAD
 [0.1.0]: https://github.com/diegomnDev/swex-ng/releases/tag/v0.1.0
