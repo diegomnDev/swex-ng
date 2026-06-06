@@ -18,8 +18,10 @@ use hudsucker::{
     rustls::crypto::aws_lc_rs,
     Body, HttpContext, HttpHandler, Proxy, RequestOrResponse,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 use crate::cert::CaFiles;
@@ -31,6 +33,21 @@ pub struct SwHandler {
     pub out_dir: PathBuf,
     pub app: AppHandle,
     is_gateway: bool,
+    /// Diagnostic: when set (`SWEX_CAPTURE_ALL=1`), dump the decrypted JSON of
+    /// EVERY command — not just login — to `out_dir/captures/`. Off by default
+    /// so normal use never fills the disk. See README-diagnostics.md.
+    capture_all: bool,
+    /// Diagnostic: unit_ids to hunt for (`SWEX_HUNT_IDS="123,456"`). Every
+    /// decrypted payload is searched recursively; matches are logged with the
+    /// command name + JSON path so we can identify a command we don't know the
+    /// name of yet (e.g. the WGB-defense set, which sw-exporter never captures).
+    hunt_ids: Vec<i64>,
+    /// `wizard_id -> profile file path`, recorded when a login profile is
+    /// written. Lets a later command (e.g. the WGB-defense set, which arrives
+    /// only when that screen is opened) re-open the same file and merge into it,
+    /// mirroring sw-exporter's `mergeStorage` flow. Shared across the per-
+    /// connection clones of this handler, hence `Arc<Mutex<_>>`.
+    profiles: Arc<Mutex<HashMap<i64, PathBuf>>>,
 }
 
 impl SwHandler {
@@ -40,6 +57,9 @@ impl SwHandler {
             out_dir,
             app,
             is_gateway: false,
+            capture_all: env_capture_all(),
+            hunt_ids: env_hunt_ids(),
+            profiles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -105,6 +125,18 @@ impl HttpHandler for SwHandler {
 impl SwHandler {
     fn handle_command(&self, mut json: serde_json::Value) {
         let command = json.get("command").and_then(|c| c.as_str()).unwrap_or("");
+
+        // --- Diagnostic mode (off by default) ---------------------------------
+        // Runs for EVERY command before the normal login handling below, so we
+        // can discover commands we don't handle yet (the WGB-defense set is not
+        // captured by any sw-exporter plugin, so its name is unverified — these
+        // two probes are how we find it from a real capture).
+        if self.capture_all {
+            self.capture_raw(command, &json);
+        }
+        self.run_hunt(command, &json);
+        // ----------------------------------------------------------------------
+
         if command == "HubUserLogin" || command == "GuestLogin" {
             // profile-export.js checks building_list presence for completeness.
             if json.get("building_list").is_none() {
@@ -148,6 +180,9 @@ impl SwHandler {
                         return;
                     }
                     self.log("success", format!("Saved profile to {filename}"));
+                    // Remember where this wizard's profile lives so a later
+                    // command (WGB defense) can merge into the same file.
+                    self.profiles.lock().unwrap().insert(wid, path.clone());
                     let _ = self.app.emit("profile-captured", serde_json::json!({
                         "wizard_id": wid,
                         "wizard_name": wname,
@@ -158,9 +193,230 @@ impl SwHandler {
                 }
                 Err(e) => self.log("error", format!("serialize error: {e}")),
             }
+        } else if command == "GetServerGuildWarDefenseDeckList" {
+            // World Guild Battle defense decks. NOT present in the login payload
+            // and NOT captured by any sw-exporter plugin — command name verified
+            // only against a real capture. Arrives when the WGB-defense screen is
+            // opened; we merge it into the already-written profile.
+            self.merge_guildwar_defense(&json);
         } else {
             self.log("debug", format!("command {command}"));
         }
+    }
+
+    /// Merge a `GetServerGuildWarDefenseDeckList` payload into the profile file
+    /// written at login. The WGB data is namespaced under a new top-level
+    /// `guildwar_defense` key — it must NOT be spread at top level because the
+    /// login payload already owns `deck_list` (arena/general decks). This export
+    /// key is our own schema (to be confirmed against the sw-builder importer),
+    /// not a com2us field name.
+    fn merge_guildwar_defense(&self, json: &serde_json::Value) {
+        let wid = json
+            .get("target_wizard_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let path = match self.profiles.lock().unwrap().get(&wid).cloned() {
+            Some(p) => p,
+            None => {
+                self.log(
+                    "warning",
+                    format!(
+                        "WGB defense received for wizard {wid}, but no profile saved yet this \
+                         session — log in first, then reopen the WGB-defense screen."
+                    ),
+                );
+                return;
+            }
+        };
+
+        let mut profile: serde_json::Value = match std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+        {
+            Some(v) => v,
+            None => {
+                self.log("error", format!("WGB merge: could not read {path:?}"));
+                return;
+            }
+        };
+
+        let deck_count = match merge_wgb_into(&mut profile, json) {
+            Ok(n) => n,
+            Err(e) => {
+                self.log("error", format!("WGB merge: {e}"));
+                return;
+            }
+        };
+
+        match serde_json::to_vec_pretty(&profile) {
+            Ok(buf) => match std::fs::write(&path, buf) {
+                Ok(()) => {
+                    self.log(
+                        "success",
+                        format!("Merged World Guild Battle defense ({deck_count} decks) into the profile."),
+                    );
+                    let _ = self.app.emit(
+                        "profile-updated",
+                        serde_json::json!({
+                            "wizard_id": wid,
+                            "path": path.to_string_lossy(),
+                            "guildwar_defense_decks": deck_count,
+                        }),
+                    );
+                }
+                Err(e) => self.log("error", format!("WGB merge: write failed: {e}")),
+            },
+            Err(e) => self.log("error", format!("WGB merge: serialize failed: {e}")),
+        }
+    }
+
+    /// CAPTURE-ALL: dump the full decrypted JSON of `command` to
+    /// `out_dir/captures/{epoch_ms}-{command}.json` (subdir created on demand).
+    fn capture_raw(&self, command: &str, json: &serde_json::Value) {
+        let dir = self.out_dir.join("captures");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.log("error", format!("capture: could not create {dir:?}: {e}"));
+            return;
+        }
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let safe = crate::profile::sanitize_filename(if command.is_empty() {
+            "unknown"
+        } else {
+            command
+        });
+        let name = format!("{ms}-{safe}.json");
+        match serde_json::to_vec_pretty(json) {
+            Ok(buf) => match std::fs::write(dir.join(&name), buf) {
+                Ok(()) => self.log("info", format!("captured '{command}' -> captures/{name}")),
+                Err(e) => self.log("error", format!("capture: write {name} failed: {e}")),
+            },
+            Err(e) => self.log("error", format!("capture: serialize {command} failed: {e}")),
+        }
+    }
+
+    /// HUNT: recursively search the decrypted payload for any of `hunt_ids`. On a
+    /// match, emit a loud `success` log naming the command + the JSON path(s) —
+    /// this reveals WHICH command carries those unit_ids even when we don't know
+    /// its name in advance.
+    fn run_hunt(&self, command: &str, json: &serde_json::Value) {
+        if self.hunt_ids.is_empty() {
+            return;
+        }
+        let mut hits = Vec::new();
+        find_id_paths(json, &self.hunt_ids, "", &mut hits);
+        if hits.is_empty() {
+            return;
+        }
+        let mut ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let id_list = ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let paths = hits
+            .iter()
+            .map(|(id, p)| format!("  {p} = {id}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.log(
+            "success",
+            format!("HUNT match in command '{command}' — ids [{id_list}] at:\n{paths}"),
+        );
+    }
+}
+
+/// Insert the WGB-defense blocks into `profile` under a `guildwar_defense` key,
+/// keeping `deck_list` (round assignments) + `round_unit_list` (full builds).
+/// Returns the number of defense decks. Errors if `profile` isn't a JSON object.
+fn merge_wgb_into(
+    profile: &mut serde_json::Value,
+    cmd: &serde_json::Value,
+) -> Result<usize, &'static str> {
+    let obj = profile
+        .as_object_mut()
+        .ok_or("profile root is not a JSON object")?;
+    obj.insert(
+        "guildwar_defense".to_string(),
+        serde_json::json!({
+            "deck_list": cmd.get("deck_list").cloned().unwrap_or(serde_json::Value::Null),
+            "round_unit_list": cmd.get("round_unit_list").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+    );
+    Ok(cmd
+        .get("deck_list")
+        .and_then(|d| d.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0))
+}
+
+/// `SWEX_CAPTURE_ALL` is on for `1`/`true`/`yes` (case-insensitive), else off.
+fn env_capture_all() -> bool {
+    std::env::var("SWEX_CAPTURE_ALL")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
+/// Parse `SWEX_HUNT_IDS` — comma/space-separated i64s; non-numeric tokens skipped.
+fn env_hunt_ids() -> Vec<i64> {
+    std::env::var("SWEX_HUNT_IDS")
+        .map(|raw| {
+            raw.split([',', ' ', '\t', '\n'])
+                .filter_map(|t| t.trim().parse::<i64>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Recursively walk `val`, recording the JSON path of every scalar equal to one
+/// of `targets`. Numbers match directly; strings match if they parse to the same
+/// i64 (com2us sometimes ships ids as strings). Paths look like
+/// `deck_list[0].unit_id`, so the matching command's structure is self-evident.
+fn find_id_paths(
+    val: &serde_json::Value,
+    targets: &[i64],
+    path: &str,
+    hits: &mut Vec<(i64, String)>,
+) {
+    use serde_json::Value;
+    match val {
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if targets.contains(&i) {
+                    hits.push((i, path.to_string()));
+                }
+            }
+        }
+        Value::String(s) => {
+            if let Ok(i) = s.parse::<i64>() {
+                if targets.contains(&i) {
+                    hits.push((i, path.to_string()));
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for (idx, item) in arr.iter().enumerate() {
+                find_id_paths(item, targets, &format!("{path}[{idx}]"), hits);
+            }
+        }
+        Value::Object(map) => {
+            for (k, v) in map {
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                find_id_paths(v, targets, &child, hits);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -187,4 +443,69 @@ pub async fn run_proxy(
 
     proxy.start().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_id_paths;
+    use serde_json::json;
+
+    #[test]
+    fn finds_ids_in_nested_arrays_and_objects() {
+        // Shape mimics an unknown command we're hunting for.
+        let payload = json!({
+            "command": "SomeUnknownCmd",
+            "deck_list": [
+                { "unit_id": 27391078482_i64, "pos": 1 },
+                { "unit_id": 6928412455_i64,  "pos": 2 }
+            ],
+            "leader": { "unit_id": 8469990197_i64 },
+            "noise": 12345
+        });
+        let targets = [27391078482_i64, 6928412455, 8469990197];
+        let mut hits = Vec::new();
+        find_id_paths(&payload, &targets, "", &mut hits);
+
+        let paths: Vec<&str> = hits.iter().map(|(_, p)| p.as_str()).collect();
+        assert!(paths.contains(&"deck_list[0].unit_id"));
+        assert!(paths.contains(&"deck_list[1].unit_id"));
+        assert!(paths.contains(&"leader.unit_id"));
+        assert_eq!(hits.len(), 3, "should not match unrelated 'noise'");
+    }
+
+    #[test]
+    fn matches_ids_shipped_as_strings() {
+        let payload = json!({ "wrap": { "id": "5954832488" } });
+        let mut hits = Vec::new();
+        find_id_paths(&payload, &[5954832488_i64], "", &mut hits);
+        assert_eq!(hits, vec![(5954832488_i64, "wrap.id".to_string())]);
+    }
+
+    #[test]
+    fn wgb_merge_namespaces_without_clobbering_login_deck_list() {
+        use super::merge_wgb_into;
+        // Login profile already owns a top-level `deck_list` (arena decks).
+        let mut profile = json!({
+            "command": "HubUserLogin",
+            "deck_list": ["arena-deck-A", "arena-deck-B"],
+            "unit_list": []
+        });
+        let cmd = json!({
+            "command": "GetServerGuildWarDefenseDeckList",
+            "target_wizard_id": 6062946,
+            "deck_list": [{ "round": 1, "unit_id_list": [1, 2, 3] }],
+            "round_unit_list": [[{ "pos_id": 1, "unit_info": { "unit_id": 1 } }]]
+        });
+
+        let n = merge_wgb_into(&mut profile, &cmd).unwrap();
+        assert_eq!(n, 1, "one defense deck");
+        // Login's own deck_list is untouched.
+        assert_eq!(profile["deck_list"][0], "arena-deck-A");
+        // WGB data lives under its own namespace.
+        assert_eq!(profile["guildwar_defense"]["deck_list"][0]["round"], 1);
+        assert_eq!(
+            profile["guildwar_defense"]["round_unit_list"][0][0]["unit_info"]["unit_id"],
+            1
+        );
+    }
 }
