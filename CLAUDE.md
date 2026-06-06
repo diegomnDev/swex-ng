@@ -66,6 +66,20 @@ Tagging `v*` (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers
 updater artifacts, and publishes the GitHub Release + `latest.json` (the in-app updater reads
 this). Releases are **unsigned** by Apple; the updater payload IS signed with the Tauri key.
 
+### Keep `[Unreleased]` current between releases (don't batch it at the end)
+
+Every time a feature or hotfix lands on `main` and is confirmed — **even though it isn't
+deployed yet** — add its entry to the `## [Unreleased]` section of `CHANGELOG.md` in the
+**same commit/PR** as the change. Do NOT defer changelog writing to release time: by then the
+context (what changed and *why*) has faded, entries get forgotten, and the published Release
+ends up incomplete. The discipline is "write the changelog when the change is fresh."
+
+This makes releasing trivial and lossless: at release time you don't *author* a changelog,
+you just **rename** the already-complete `## [Unreleased]` block to `## [X.Y.Z] - YYYY-MM-DD`
+(step 3 below). `[Unreleased]` accumulates across multiple commits between tags; releasing
+drains it. So between releases there should always be an up-to-date `[Unreleased]` reflecting
+everything merged-but-not-yet-shipped.
+
 Do the steps below **in order** — the tag must point at the commit that already carries the
 bumped version and changelog, or the published Release won't match.
 
@@ -81,10 +95,12 @@ bumped version and changelog, or the published Release won't match.
    `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and the `swex-ng`
    package entry in `src-tauri/Cargo.lock` (else the next build rewrites the lock and dirties
    the tree).
-3. **Update `CHANGELOG.md`** — the Release body links to it, so it must be current. Add a
-   `## [X.Y.Z] - YYYY-MM-DD` section (Keep a Changelog format: Added/Changed/Fixed), point the
-   `[Unreleased]` compare link at the new tag, and add the `[X.Y.Z]: …/releases/tag/vX.Y.Z`
-   ref.
+3. **Cut `CHANGELOG.md`** — the entries should already be sitting under `## [Unreleased]` (you
+   added each one when its change landed, see above). **Rename** that block to
+   `## [X.Y.Z] - YYYY-MM-DD` (Keep a Changelog format: Added/Changed/Fixed), leave a fresh empty
+   `## [Unreleased]` above it, point the `[Unreleased]` compare link at the new tag, and add the
+   `[X.Y.Z]: …/releases/tag/vX.Y.Z` ref. If `[Unreleased]` is empty at this point, something was
+   merged without a changelog entry — go find it before tagging.
 4. **Commit + push to `main`** (branch protection requires the `check` status to pass — push
    the bump, let CI go green, only then tag).
 5. **Tag + push the tag:** `git tag vX.Y.Z && git push origin vX.Y.Z`. Watch the run with
