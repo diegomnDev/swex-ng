@@ -94,12 +94,22 @@ Required repo secrets for `release.yml`: `TAURI_SIGNING_PRIVATE_KEY` **and**
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the local key in `~/.swex-ng-keys/updater.key` has an
 **empty** password). `GITHUB_TOKEN` is provided automatically.
 
-To build + deploy a signed copy locally (e.g. to test before tagging), the updater signing env
-vars must be set or `pnpm tauri build` fails with *"no private key"*:
+**DON'T install the locally-built bumped version into `/Applications` before releasing.** The
+whole point of a release is to validate that the in-app auto-updater pulls the new version — but
+that only works if the **previous** version is still the one installed. If you `cp` the freshly
+built X.Y.Z `.app` into `/Applications` first, you're already on X.Y.Z and the updater has
+nothing to do, so you can no longer test the update path for that version. Correct order:
+leave the OLD version in `/Applications` → bump + tag + let `release.yml` publish → open the
+running OLD app and confirm it detects and installs the update on its own.
+
+Building locally is still fine for a quick smoke test, but either (a) do it from a build that is
+NOT a version bump, or (b) install it somewhere other than `/Applications` so the real installed
+copy stays on the prior version. The signing env vars must be set or `pnpm tauri build` fails
+with *"no private key"*:
 ```bash
 export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.swex-ng-keys/updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 pnpm tauri build
-rm -rf /Applications/SWEX-NG.app
-cp -R src-tauri/target/release/bundle/macos/SWEX-NG.app /Applications/SWEX-NG.app
+# Only replace the installed app when you are NOT validating the updater for this version:
+# rm -rf /Applications/SWEX-NG.app && cp -R src-tauri/target/release/bundle/macos/SWEX-NG.app /Applications/SWEX-NG.app
 ```
