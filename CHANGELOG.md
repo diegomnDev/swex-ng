@@ -6,7 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.1.1] - 2026-06-06
+### Added
+- World Guild Battle (WGB) defense is now merged into the profile export. These decks are
+  **not** in the `HubUserLogin` payload — they arrive in `GetServerGuildWarDefenseDeckList`
+  only when that screen is opened (command name verified against a real capture; sw-exporter
+  has no plugin for it). The login profile is written as before, then re-opened and enriched
+  with a new top-level `guildwar_defense` key (`deck_list` + full per-unit `round_unit_list`),
+  namespaced so it can't clobber the login's own `deck_list`.
+- Diagnostic discovery mode (off by default): `SWEX_CAPTURE_ALL=1` dumps every decrypted
+  command to `out_dir/captures/`, and `SWEX_HUNT_IDS="id,…"` logs the command + JSON path of
+  any payload containing those unit ids. See `README-diagnostics.md`.
+
+### Changed
+- macOS app icon reshaped to the standard rounded-square (squircle) with safe-area padding.
 
 ### Fixed
 - Profile export now matches sw-exporter's `sortUserData`. The game's PHP backend sometimes
