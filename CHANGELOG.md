@@ -6,13 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-06
+
 ### Added
 - World Guild Battle (WGB) defense is now merged into the profile export. These decks are
   **not** in the `HubUserLogin` payload — they arrive in `GetServerGuildWarDefenseDeckList`
   only when that screen is opened (command name verified against a real capture; sw-exporter
   has no plugin for it). The login profile is written as before, then re-opened and enriched
   with a new top-level `guildwar_defense` key (`deck_list` + full per-unit `round_unit_list`),
-  namespaced so it can't clobber the login's own `deck_list`.
+  namespaced so it can't clobber the login's own `deck_list`. The original Summoners War
+  Exporter doesn't capture this — a small bonus on top of full profile parity, not a
+  competition.
 - Diagnostic discovery mode (off by default): `SWEX_CAPTURE_ALL=1` dumps every decrypted
   command to `out_dir/captures/`, and `SWEX_HUNT_IDS="id,…"` logs the command + JSON path of
   any payload containing those unit ids. See `README-diagnostics.md`.
@@ -47,5 +51,6 @@ First public release. Native macOS, no Electron, no Rosetta.
 - Ported `mapping.js` helpers: `monster_name`, `rune_efficiency` (ancient-aware), with
   tests asserting parity against the original.
 
-[Unreleased]: https://github.com/diegomnDev/swex-ng/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/diegomnDev/swex-ng/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/diegomnDev/swex-ng/releases/tag/v0.2.0
 [0.1.0]: https://github.com/diegomnDev/swex-ng/releases/tag/v0.1.0

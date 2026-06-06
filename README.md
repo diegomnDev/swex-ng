@@ -87,6 +87,14 @@ set `SWEX_KEY=<hex>` in the environment.
 Only `*.qpyou.cn` traffic is intercepted; everything else is tunnelled untouched
 (same surgical behaviour as the original — your other apps are unaffected).
 
+### World Guild Battle defense (a small extra)
+
+Your WGB defense teams aren't part of the login payload — the game only sends them when
+you open the **WGB defense** screen. Open it once while the proxy is running and SWEX-NG
+merges those teams (with full rune/artifact builds) into the same profile file under a
+`guildwar_defense` key. The original Summoners War Exporter doesn't capture this — it's a
+small bonus on top of full profile parity, not a competition.
+
 ## Build from source
 
 **Prerequisites:** [Rust](https://rustup.rs) (stable), Node 20 + `pnpm`,
