@@ -484,29 +484,12 @@ fn count_runes(json: &serde_json::Value) -> usize {
     free + equipped
 }
 
-/// Best-effort monster id from a `getUnitStats*` request. The request format is
-/// unverified (not yet captured), so try the obvious `unit_master_id` key first,
-/// then fall back to the first 5-digit integer anywhere that resolves to a real
-/// monster name via mapping. None if nothing plausible is found.
+/// Monster id from a `getUnitStats*` request. VERIFIED against a real capture: the
+/// field is a top-level `unit_master_id`, present even for monsters you don't own
+/// (these stats are global). None if absent.
 fn request_unit_master_id(req: &serde_json::Value) -> Option<i64> {
-    if let Some(id) = req
-        .get("unit_master_id")
+    req.get("unit_master_id")
         .and_then(serde_json::Value::as_i64)
-    {
-        return Some(id);
-    }
-    fn scan(v: &serde_json::Value) -> Option<i64> {
-        match v {
-            serde_json::Value::Number(n) => n.as_i64().filter(|&i| {
-                (10000..=99999).contains(&i)
-                    && crate::mapping::get_monster_name(i) != "Unknown Monster"
-            }),
-            serde_json::Value::Array(a) => a.iter().find_map(scan),
-            serde_json::Value::Object(m) => m.values().find_map(scan),
-            _ => None,
-        }
-    }
-    scan(req)
 }
 
 /// Drop the com2us response envelope, keeping only the stats payload keys.
