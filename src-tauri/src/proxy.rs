@@ -49,12 +49,18 @@ pub struct SwHandler {
     /// connection clones of this handler, hence `Arc<Mutex<_>>`.
     profiles: Arc<Mutex<HashMap<i64, PathBuf>>>,
     /// Decrypted gateway request paired with the next response on this same
-    /// connection (only populated under capture-all). Mirrors sw-exporter, which
-    /// buffers request+response and decrypts both in onResponseEnd; lets a capture
-    /// record the request that produced a response — e.g. which unit_master_id a
-    /// getUnitStats* answer is for (the monster id is in the request, never the
-    /// response).
+    /// connection (populated under capture-all OR runestats). Mirrors sw-exporter,
+    /// which buffers request+response and decrypts both in onResponseEnd; lets a
+    /// capture record the request that produced a response — e.g. which
+    /// unit_master_id a getUnitStats* answer is for (the monster id is in the
+    /// request, never the response).
     pending_request: Option<serde_json::Value>,
+    /// Collection mode (`SWEX_RUNESTATS=1`): pair each `getUnitStats{Rune,Artifact}Info`
+    /// response with its request to attribute it to a monster, and write a clean,
+    /// per-monster file to `out_dir/runestats/`. These are com2us's GLOBAL community
+    /// usage stats (set/stat popularity), NOT account data, so they're kept out of
+    /// the profile export entirely.
+    runestats: bool,
 }
 
 impl SwHandler {
@@ -68,6 +74,7 @@ impl SwHandler {
             hunt_ids: env_hunt_ids(),
             profiles: Arc::new(Mutex::new(HashMap::new())),
             pending_request: None,
+            runestats: env_runestats(),
         }
     }
 
@@ -101,7 +108,7 @@ impl HttpHandler for SwHandler {
         // capture can be paired with it (the monster a getUnitStats* answer is for
         // lives in the request, not the response). The ORIGINAL bytes are forwarded
         // unchanged — same length, so Content-Length stays valid.
-        if self.is_gateway && self.capture_all {
+        if self.is_gateway && (self.capture_all || self.runestats) {
             let (parts, body) = req.into_parts();
             let bytes = match body.collect().await {
                 Ok(c) => c.to_bytes(),
@@ -158,6 +165,12 @@ impl SwHandler {
             self.capture_raw(command, &json);
         }
         self.run_hunt(command, &json);
+        // Collection: clean per-monster community rune/artifact stats.
+        if (self.capture_all || self.runestats)
+            && matches!(command, "getUnitStatsRuneInfo" | "getUnitStatsArtifactInfo")
+        {
+            self.save_unit_stats(command, &json);
+        }
         // ----------------------------------------------------------------------
 
         if command == "HubUserLogin" || command == "GuestLogin" {
@@ -337,6 +350,66 @@ impl SwHandler {
         }
     }
 
+    /// Collect com2us community rune/artifact usage stats into a clean, merged,
+    /// per-monster file under `out_dir/runestats/`. The response never names its
+    /// monster — `unit_master_id` lives in the paired request — so it's pulled from
+    /// `pending_request`. The rune and artifact responses (separate commands for the
+    /// same monster) are merged into one `{name}-{id}.json`.
+    fn save_unit_stats(&self, command: &str, json: &serde_json::Value) {
+        let Some(req) = self.pending_request.as_ref() else {
+            self.log(
+                "warning",
+                format!("{command}: no paired request — can't tell which monster; skipped."),
+            );
+            return;
+        };
+        let Some(master_id) = request_unit_master_id(req) else {
+            self.log(
+                "warning",
+                format!(
+                    "{command}: no unit_master_id found in the request — skipped. Send me the \
+                     matching captures/*.request.json so I can confirm the field."
+                ),
+            );
+            return;
+        };
+        let name = crate::mapping::get_monster_name(master_id);
+        let dir = self.out_dir.join("runestats");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.log("error", format!("runestats: could not create {dir:?}: {e}"));
+            return;
+        }
+        let file = dir.join(format!(
+            "{}-{master_id}.json",
+            crate::profile::sanitize_filename(&name)
+        ));
+        // Merge into any existing record so rune + artifact land in one file.
+        let mut record = std::fs::read(&file)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .unwrap_or_else(
+                || serde_json::json!({ "unit_master_id": master_id, "monster_name": name }),
+            );
+        let section = if command == "getUnitStatsRuneInfo" {
+            "rune"
+        } else {
+            "artifact"
+        };
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert(section.to_string(), strip_envelope(json));
+        }
+        match serde_json::to_vec_pretty(&record) {
+            Ok(buf) => match std::fs::write(&file, buf) {
+                Ok(()) => self.log(
+                    "success",
+                    format!("runestats: {name} ({master_id}) {section} saved"),
+                ),
+                Err(e) => self.log("error", format!("runestats: write failed: {e}")),
+            },
+            Err(e) => self.log("error", format!("runestats: serialize failed: {e}")),
+        }
+    }
+
     /// HUNT: recursively search the decrypted payload for any of `hunt_ids`. On a
     /// match, emit a loud `success` log naming the command + the JSON path(s) —
     /// this reveals WHICH command carries those unit_ids even when we don't know
@@ -409,6 +482,66 @@ fn count_runes(json: &serde_json::Value) -> usize {
         .map(|units| units.iter().map(|u| arr_len(u.get("runes"))).sum())
         .unwrap_or(0);
     free + equipped
+}
+
+/// Best-effort monster id from a `getUnitStats*` request. The request format is
+/// unverified (not yet captured), so try the obvious `unit_master_id` key first,
+/// then fall back to the first 5-digit integer anywhere that resolves to a real
+/// monster name via mapping. None if nothing plausible is found.
+fn request_unit_master_id(req: &serde_json::Value) -> Option<i64> {
+    if let Some(id) = req
+        .get("unit_master_id")
+        .and_then(serde_json::Value::as_i64)
+    {
+        return Some(id);
+    }
+    fn scan(v: &serde_json::Value) -> Option<i64> {
+        match v {
+            serde_json::Value::Number(n) => n.as_i64().filter(|&i| {
+                (10000..=99999).contains(&i)
+                    && crate::mapping::get_monster_name(i) != "Unknown Monster"
+            }),
+            serde_json::Value::Array(a) => a.iter().find_map(scan),
+            serde_json::Value::Object(m) => m.values().find_map(scan),
+            _ => None,
+        }
+    }
+    scan(req)
+}
+
+/// Drop the com2us response envelope, keeping only the stats payload keys.
+fn strip_envelope(json: &serde_json::Value) -> serde_json::Value {
+    const DROP: &[&str] = &[
+        "command",
+        "ret_code",
+        "ts_val",
+        "tvalue",
+        "tvaluelocal",
+        "tvaluelocal_next_monday",
+        "tzone",
+        "tzoffset",
+        "reqid",
+        "this_server_id",
+    ];
+    match json {
+        serde_json::Value::Object(m) => serde_json::Value::Object(
+            m.iter()
+                .filter(|(k, _)| !DROP.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// `SWEX_RUNESTATS` is on for `1`/`true`/`yes` (case-insensitive), else off.
+fn env_runestats() -> bool {
+    std::env::var("SWEX_RUNESTATS")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
 }
 
 /// `SWEX_CAPTURE_ALL` is on for `1`/`true`/`yes` (case-insensitive), else off.
@@ -536,6 +669,34 @@ mod tests {
         let mut hits = Vec::new();
         find_id_paths(&payload, &[5954832488_i64], "", &mut hits);
         assert_eq!(hits, vec![(5954832488_i64, "wrap.id".to_string())]);
+    }
+
+    #[test]
+    fn request_master_id_prefers_direct_key() {
+        use super::request_unit_master_id;
+        let req = json!({ "unit_master_id": 17915, "noise": 1780905664000_i64 });
+        assert_eq!(request_unit_master_id(&req), Some(17915));
+    }
+
+    #[test]
+    fn request_master_id_ignores_non_monster_ints() {
+        use super::request_unit_master_id;
+        // No master-id key; only a timestamp + wizard id (neither resolves/in range).
+        let req = json!({ "ts": 1780905664000_i64, "wizard_id": 6062946 });
+        assert_eq!(request_unit_master_id(&req), None);
+    }
+
+    #[test]
+    fn strip_envelope_keeps_payload_drops_meta() {
+        use super::strip_envelope;
+        let resp = json!({
+            "command": "getUnitStatsRuneInfo", "ret_code": 0, "ts_val": 123, "reqid": 9,
+            "runeset": [{"set_list": [10, 15], "count": 1862}], "favorite_type": 0
+        });
+        let s = strip_envelope(&resp);
+        assert!(s.get("command").is_none() && s.get("ret_code").is_none());
+        assert_eq!(s["runeset"][0]["count"], 1862);
+        assert_eq!(s["favorite_type"], 0);
     }
 
     #[test]

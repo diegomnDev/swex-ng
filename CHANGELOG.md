@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Community rune/artifact stats collection (`SWEX_RUNESTATS=1`, off by default). Captures the
+  in-game per-monster recommendation stats (`getUnitStatsRuneInfo` / `getUnitStatsArtifactInfo`)
+  — com2us's GLOBAL set/main-stat/sub-stat usage counts — and writes one clean, merged file per
+  monster to `out_dir/runestats/{name}-{master_id}.json`. The monster is resolved from the
+  paired request (the response itself never names it). This is community data, not account data,
+  so it is kept entirely out of the profile export.
+
 ### Changed
 - Diagnostic capture (`SWEX_CAPTURE_ALL=1`) now also decrypts and saves the matching
   `gateway_c2.php` **request** next to each response (`{ts}-{command}.request.json`). Some

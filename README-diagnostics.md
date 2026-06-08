@@ -29,6 +29,27 @@ that screen, which we currently drop in the `else` branch of `handle_command`.
 
 The two are independent — use either or both.
 
+## Community rune/artifact stats (`SWEX_RUNESTATS=1`)
+
+A separate collection mode. When set, every `getUnitStatsRuneInfo` /
+`getUnitStatsArtifactInfo` response (the in-game per-monster **Recommendation**
+tab — com2us's GLOBAL set/main-stat/sub-stat usage counts across the whole
+playerbase) is saved as a clean, merged file per monster:
+
+```
+<out_dir>/runestats/{monster_name}-{master_id}.json   # { rune: {...}, artifact: {...} }
+```
+
+The response never names its monster — the `unit_master_id` is only in the paired
+request — so this mode buffers+decrypts the request and resolves the name via
+`mapping.json`. Open a monster's recommendation page in-game to capture it.
+
+> This is **community data, not your account** (it's identical for every player),
+> so it is kept out of the profile export. To collect many monsters you must open
+> each one's page; there is no bulk command. Do **not** automate this by forging
+> requests against your main account — that is active, detectable traffic (ban
+> risk), unlike the passive capture here.
+
 ## How to run
 
 ```bash
