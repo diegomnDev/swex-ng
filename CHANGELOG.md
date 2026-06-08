@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- The capture summary now reports the **total** rune count (free + equipped) instead of only
+  the free/unequipped runes. The previous figure was misleadingly low — most runes are
+  equipped on monsters (`unit_list[*].runes`), not loose in `runes`. WGB-defense runes are not
+  double-counted.
+
 ## [0.2.0] - 2026-06-06
 
 ### Added

@@ -188,7 +188,7 @@ impl SwHandler {
                         "wizard_name": wname,
                         "path": path.to_string_lossy(),
                         "monster_count": json.get("unit_list").and_then(|u| u.as_array()).map(|a| a.len()).unwrap_or(0),
-                        "rune_count": json.get("runes").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0),
+                        "rune_count": count_runes(&json),
                     }));
                 }
                 Err(e) => self.log("error", format!("serialize error: {e}")),
@@ -354,6 +354,23 @@ fn merge_wgb_into(
         .unwrap_or(0))
 }
 
+/// Total runes in a profile = free (top-level `runes`) + equipped
+/// (`unit_list[*].runes`). The UI showed only the free count before, which looked
+/// wrong (most runes are equipped). Runes under `guildwar_defense.round_unit_list`
+/// are intentionally NOT counted: those units are already in `unit_list`, so adding
+/// them would double up. Call after `sort_user_data` so rune lists are arrays.
+fn count_runes(json: &serde_json::Value) -> usize {
+    let arr_len =
+        |v: Option<&serde_json::Value>| v.and_then(|x| x.as_array()).map_or(0, |a| a.len());
+    let free = arr_len(json.get("runes"));
+    let equipped: usize = json
+        .get("unit_list")
+        .and_then(|u| u.as_array())
+        .map(|units| units.iter().map(|u| arr_len(u.get("runes"))).sum())
+        .unwrap_or(0);
+    free + equipped
+}
+
 /// `SWEX_CAPTURE_ALL` is on for `1`/`true`/`yes` (case-insensitive), else off.
 fn env_capture_all() -> bool {
     std::env::var("SWEX_CAPTURE_ALL")
@@ -479,6 +496,24 @@ mod tests {
         let mut hits = Vec::new();
         find_id_paths(&payload, &[5954832488_i64], "", &mut hits);
         assert_eq!(hits, vec![(5954832488_i64, "wrap.id".to_string())]);
+    }
+
+    #[test]
+    fn counts_free_plus_equipped_runes_not_guildwar() {
+        use super::count_runes;
+        let profile = json!({
+            "runes": [{"id": 1}, {"id": 2}, {"id": 3}],          // 3 free
+            "unit_list": [
+                {"unit_id": 10, "runes": [{"id": 4}, {"id": 5}]}, // 2 equipped
+                {"unit_id": 11, "runes": [{"id": 6}]},            // 1 equipped
+                {"unit_id": 12, "runes": []},                     // 0
+            ],
+            // Must NOT be counted (its unit is already in unit_list).
+            "guildwar_defense": {
+                "round_unit_list": [[{"unit_info": {"unit_id": 10, "runes": [{"id": 4}, {"id": 5}]}}]]
+            }
+        });
+        assert_eq!(count_runes(&profile), 6); // 3 free + 3 equipped, guildwar ignored
     }
 
     #[test]
