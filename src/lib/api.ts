@@ -5,6 +5,9 @@ import { open, message } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import {
+  isPermissionGranted, requestPermission, sendNotification,
+} from "@tauri-apps/plugin-notification";
 
 export const REPO_URL = "https://github.com/diegomnDev/swex-ng";
 export const getAppVersion = () => getVersion();
@@ -28,6 +31,31 @@ export interface ProfileCaptured {
   monster_count: number;
   rune_count: number;
 }
+
+/// Persisted settings — mirrors the Rust `Settings` struct (snake_case fields).
+export interface Settings {
+  port: number;
+  verbose: boolean;
+  capture_all: boolean;
+  hunt_ids: string;
+  runestats: boolean;
+  save_request: boolean;
+  timestamped_copy: boolean;
+  pretty_json: boolean;
+  merge_wgb: boolean;
+  notify_on_capture: boolean;
+  auto_start: boolean;
+}
+
+export const getSettings = () => invoke<Settings>("get_settings");
+export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
+
+/// Fire a native macOS notification, requesting permission on first use.
+export const notifyCapture = async (title: string, body: string): Promise<void> => {
+  let granted = await isPermissionGranted();
+  if (!granted) granted = (await requestPermission()) === "granted";
+  if (granted) sendNotification({ title, body });
+};
 
 export const getStatus = () => invoke<Status>("get_status");
 export const setKey = (hex: string) => invoke<void>("set_key", { hex });

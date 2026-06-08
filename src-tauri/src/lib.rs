@@ -4,6 +4,7 @@ mod macos;
 mod mapping;
 mod profile;
 mod proxy;
+mod settings;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -134,7 +135,8 @@ async fn start_proxy(
     *state.shutdown.lock().unwrap() = Some(tx);
     *state.running.lock().unwrap() = true;
 
-    let handler = proxy::SwHandler::new(key, current_out_dir(&app, &state), app.clone());
+    let cfg = settings::resolve(&settings::load(&config_dir(&app)));
+    let handler = proxy::SwHandler::new(key, current_out_dir(&app, &state), app.clone(), cfg);
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -173,6 +175,16 @@ fn monster_name(id: i64) -> String {
     mapping::get_monster_name(id)
 }
 
+#[tauri::command]
+fn get_settings(app: tauri::AppHandle) -> settings::Settings {
+    settings::load(&config_dir(&app))
+}
+
+#[tauri::command]
+fn set_settings(app: tauri::AppHandle, settings: settings::Settings) -> Result<(), String> {
+    settings::save(&config_dir(&app), &settings)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
@@ -181,6 +193,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
         .on_menu_event(|app, event| {
             // "Check for Updates…" lives in the native macOS menu; tell the
@@ -251,7 +264,9 @@ pub fn run() {
             rune_efficiency,
             monster_name,
             set_out_dir,
-            reset_out_dir
+            reset_out_dir,
+            get_settings,
+            set_settings
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

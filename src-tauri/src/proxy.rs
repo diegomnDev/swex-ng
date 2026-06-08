@@ -27,21 +27,27 @@ use tauri::{AppHandle, Emitter};
 use crate::cert::CaFiles;
 use crate::decode::{decrypt_request, decrypt_response};
 
+/// Behaviour toggles for one proxy run, assembled from persisted settings (+ env
+/// overrides) in `settings::resolve`. See `settings.rs` for what each one means.
+#[derive(Clone, Default)]
+pub struct HandlerConfig {
+    pub verbose: bool,
+    pub capture_all: bool,
+    pub hunt_ids: Vec<i64>,
+    pub runestats: bool,
+    pub save_request: bool,
+    pub timestamped_copy: bool,
+    pub pretty_json: bool,
+    pub merge_wgb: bool,
+}
+
 #[derive(Clone)]
 pub struct SwHandler {
     pub key: [u8; 16],
     pub out_dir: PathBuf,
     pub app: AppHandle,
     is_gateway: bool,
-    /// Diagnostic: when set (`SWEX_CAPTURE_ALL=1`), dump the decrypted JSON of
-    /// EVERY command — not just login — to `out_dir/captures/`. Off by default
-    /// so normal use never fills the disk. See README-diagnostics.md.
-    capture_all: bool,
-    /// Diagnostic: unit_ids to hunt for (`SWEX_HUNT_IDS="123,456"`). Every
-    /// decrypted payload is searched recursively; matches are logged with the
-    /// command name + JSON path so we can identify a command we don't know the
-    /// name of yet (e.g. the WGB-defense set, which sw-exporter never captures).
-    hunt_ids: Vec<i64>,
+    cfg: HandlerConfig,
     /// `wizard_id -> profile file path`, recorded when a login profile is
     /// written. Lets a later command (e.g. the WGB-defense set, which arrives
     /// only when that screen is opened) re-open the same file and merge into it,
@@ -55,36 +61,42 @@ pub struct SwHandler {
     /// unit_master_id a getUnitStats* answer is for (the monster id is in the
     /// request, never the response).
     pending_request: Option<serde_json::Value>,
-    /// Collection mode (`SWEX_RUNESTATS=1`): pair each `getUnitStats{Rune,Artifact}Info`
-    /// response with its request to attribute it to a monster, and write a clean,
-    /// per-monster file to `out_dir/runestats/`. These are com2us's GLOBAL community
-    /// usage stats (set/stat popularity), NOT account data, so they're kept out of
-    /// the profile export entirely.
-    runestats: bool,
 }
 
 impl SwHandler {
-    pub fn new(key: [u8; 16], out_dir: PathBuf, app: AppHandle) -> Self {
+    pub fn new(key: [u8; 16], out_dir: PathBuf, app: AppHandle, cfg: HandlerConfig) -> Self {
         Self {
             key,
             out_dir,
             app,
             is_gateway: false,
-            capture_all: env_capture_all(),
-            hunt_ids: env_hunt_ids(),
+            cfg,
             profiles: Arc::new(Mutex::new(HashMap::new())),
             pending_request: None,
-            runestats: env_runestats(),
         }
     }
 
     fn log(&self, level: &str, msg: impl Into<String>) {
+        // `debug` lines (per-command + ignored-decrypt noise) are hidden unless
+        // verbose is on, so the normal log stays readable.
+        if level == "debug" && !self.cfg.verbose {
+            return;
+        }
         let _ = self.app.emit(
             "proxy-log",
             serde_json::json!({
                 "level": level, "message": msg.into(),
             }),
         );
+    }
+
+    /// Serialize JSON honouring the pretty/compact setting.
+    fn to_json(&self, v: &serde_json::Value) -> serde_json::Result<Vec<u8>> {
+        if self.cfg.pretty_json {
+            serde_json::to_vec_pretty(v)
+        } else {
+            serde_json::to_vec(v)
+        }
     }
 }
 
@@ -108,7 +120,7 @@ impl HttpHandler for SwHandler {
         // capture can be paired with it (the monster a getUnitStats* answer is for
         // lives in the request, not the response). The ORIGINAL bytes are forwarded
         // unchanged — same length, so Content-Length stays valid.
-        if self.is_gateway && (self.capture_all || self.runestats) {
+        if self.is_gateway && (self.cfg.capture_all || self.cfg.runestats) {
             let (parts, body) = req.into_parts();
             let bytes = match body.collect().await {
                 Ok(c) => c.to_bytes(),
@@ -161,12 +173,12 @@ impl SwHandler {
         // can discover commands we don't handle yet (the WGB-defense set is not
         // captured by any sw-exporter plugin, so its name is unverified — these
         // two probes are how we find it from a real capture).
-        if self.capture_all {
+        if self.cfg.capture_all {
             self.capture_raw(command, &json);
         }
         self.run_hunt(command, &json);
         // Collection: clean per-monster community rune/artifact stats.
-        if (self.capture_all || self.runestats)
+        if (self.cfg.capture_all || self.cfg.runestats)
             && matches!(command, "getUnitStatsRuneInfo" | "getUnitStatsArtifactInfo")
         {
             self.save_unit_stats(command, &json);
@@ -209,9 +221,9 @@ impl SwHandler {
             // arrays and apply the in-game ordering before writing.
             crate::profile::sort_user_data(&mut json);
 
-            match serde_json::to_vec_pretty(&json) {
+            match self.to_json(&json) {
                 Ok(buf) => {
-                    if let Err(e) = std::fs::write(&path, buf) {
+                    if let Err(e) = std::fs::write(&path, &buf) {
                         self.log("error", format!("Could not write {filename}: {e}"));
                         return;
                     }
@@ -219,6 +231,9 @@ impl SwHandler {
                     // Remember where this wizard's profile lives so a later
                     // command (WGB defense) can merge into the same file.
                     self.profiles.lock().unwrap().insert(wid, path.clone());
+                    if self.cfg.timestamped_copy {
+                        self.write_timestamped_copy(&filename, &buf);
+                    }
                     let _ = self.app.emit("profile-captured", serde_json::json!({
                         "wizard_id": wid,
                         "wizard_name": wname,
@@ -229,7 +244,7 @@ impl SwHandler {
                 }
                 Err(e) => self.log("error", format!("serialize error: {e}")),
             }
-        } else if command == "GetServerGuildWarDefenseDeckList" {
+        } else if command == "GetServerGuildWarDefenseDeckList" && self.cfg.merge_wgb {
             // World Guild Battle defense decks. NOT present in the login payload
             // and NOT captured by any sw-exporter plugin — command name verified
             // only against a real capture. Arrives when the WGB-defense screen is
@@ -238,6 +253,21 @@ impl SwHandler {
         } else {
             self.log("debug", format!("command {command}"));
         }
+    }
+
+    /// Write a dated copy of the profile under `out_dir/profile saves/`, mirroring
+    /// sw-exporter's `timestampedCopy`. Best-effort; failure only logs nothing.
+    fn write_timestamped_copy(&self, filename: &str, buf: &[u8]) {
+        let dir = self.out_dir.join("profile saves");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let stem = filename.strip_suffix(".json").unwrap_or(filename);
+        let _ = std::fs::write(dir.join(format!("{stem}-{ms}.json")), buf);
     }
 
     /// Merge a `GetServerGuildWarDefenseDeckList` payload into the profile file
@@ -284,7 +314,7 @@ impl SwHandler {
             }
         };
 
-        match serde_json::to_vec_pretty(&profile) {
+        match self.to_json(&profile) {
             Ok(buf) => match std::fs::write(&path, buf) {
                 Ok(()) => {
                     self.log(
@@ -324,7 +354,7 @@ impl SwHandler {
             command
         });
         let name = format!("{ms}-{safe}.json");
-        match serde_json::to_vec_pretty(json) {
+        match self.to_json(json) {
             Ok(buf) => match std::fs::write(dir.join(&name), buf) {
                 Ok(()) => self.log("info", format!("captured '{command}' -> captures/{name}")),
                 Err(e) => self.log("error", format!("capture: write {name} failed: {e}")),
@@ -333,10 +363,10 @@ impl SwHandler {
         }
         // Paired request, same `{ms}-{command}` prefix with a `.request` suffix, so
         // a response that doesn't name its monster (getUnitStats*) can be matched to
-        // the request that does.
-        if let Some(req) = &self.pending_request {
+        // the request that does. Gated on `save_request` so it's opt-in noise.
+        if let (true, Some(req)) = (self.cfg.save_request, &self.pending_request) {
             let rname = format!("{ms}-{safe}.request.json");
-            match serde_json::to_vec_pretty(req) {
+            match self.to_json(req) {
                 Ok(buf) => {
                     if let Err(e) = std::fs::write(dir.join(&rname), buf) {
                         self.log("error", format!("capture: write {rname} failed: {e}"));
@@ -398,7 +428,7 @@ impl SwHandler {
         if let Some(obj) = record.as_object_mut() {
             obj.insert(section.to_string(), strip_envelope(json));
         }
-        match serde_json::to_vec_pretty(&record) {
+        match self.to_json(&record) {
             Ok(buf) => match std::fs::write(&file, buf) {
                 Ok(()) => self.log(
                     "success",
@@ -415,11 +445,11 @@ impl SwHandler {
     /// this reveals WHICH command carries those unit_ids even when we don't know
     /// its name in advance.
     fn run_hunt(&self, command: &str, json: &serde_json::Value) {
-        if self.hunt_ids.is_empty() {
+        if self.cfg.hunt_ids.is_empty() {
             return;
         }
         let mut hits = Vec::new();
-        find_id_paths(json, &self.hunt_ids, "", &mut hits);
+        find_id_paths(json, &self.cfg.hunt_ids, "", &mut hits);
         if hits.is_empty() {
             return;
         }
@@ -515,37 +545,6 @@ fn strip_envelope(json: &serde_json::Value) -> serde_json::Value {
         ),
         other => other.clone(),
     }
-}
-
-/// `SWEX_RUNESTATS` is on for `1`/`true`/`yes` (case-insensitive), else off.
-fn env_runestats() -> bool {
-    std::env::var("SWEX_RUNESTATS")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false)
-}
-
-/// `SWEX_CAPTURE_ALL` is on for `1`/`true`/`yes` (case-insensitive), else off.
-fn env_capture_all() -> bool {
-    std::env::var("SWEX_CAPTURE_ALL")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false)
-}
-
-/// Parse `SWEX_HUNT_IDS` — comma/space-separated i64s; non-numeric tokens skipped.
-fn env_hunt_ids() -> Vec<i64> {
-    std::env::var("SWEX_HUNT_IDS")
-        .map(|raw| {
-            raw.split([',', ' ', '\t', '\n'])
-                .filter_map(|t| t.trim().parse::<i64>().ok())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Recursively walk `val`, recording the JSON path of every scalar equal to one

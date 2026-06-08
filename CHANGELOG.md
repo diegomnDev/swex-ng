@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Two-tab UI (**Proxy** / **Settings**) with persisted settings (`settings.json`). Everything
+  that used to be env-var-only is now toggleable in-app: verbose logging, capture-all, hunt IDs,
+  rune/artifact stats collection, save raw requests, WGB merge, timestamped profile copies,
+  pretty/compact JSON, notify-on-capture (native macOS notification), and auto-start the proxy
+  on launch. The `SWEX_*` env vars still work and override the saved values. Settings also warns
+  when the output folder is under Desktop/Documents/Downloads (the macOS permission-prompt folders).
 - Community rune/artifact stats collection (`SWEX_RUNESTATS=1`, off by default). Captures the
   in-game per-monster recommendation stats (`getUnitStatsRuneInfo` / `getUnitStatsArtifactInfo`)
   — com2us's GLOBAL set/main-stat/sub-stat usage counts — and writes one clean, merged file per
