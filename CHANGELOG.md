@@ -21,6 +21,8 @@ All notable changes to this project are documented here. The format is based on
   so it is kept entirely out of the profile export.
 
 ### Changed
+- Capture-all now writes silently: its per-command `captured 'X'` line is `debug`-level, so
+  with verbose off the files are still written but the log stays clean (only verbose shows them).
 - Diagnostic capture (`SWEX_CAPTURE_ALL=1`) now also decrypts and saves the matching
   `gateway_c2.php` **request** next to each response (`{ts}-{command}.request.json`). Some
   responses don't identify their subject — e.g. `getUnitStatsRuneInfo` carries community rune

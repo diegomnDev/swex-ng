@@ -356,7 +356,9 @@ impl SwHandler {
         let name = format!("{ms}-{safe}.json");
         match self.to_json(json) {
             Ok(buf) => match std::fs::write(dir.join(&name), buf) {
-                Ok(()) => self.log("info", format!("captured '{command}' -> captures/{name}")),
+                // `debug` so capture-all writes silently unless verbose is on —
+                // otherwise it floods the log with one line per command.
+                Ok(()) => self.log("debug", format!("captured '{command}' -> captures/{name}")),
                 Err(e) => self.log("error", format!("capture: write {name} failed: {e}")),
             },
             Err(e) => self.log("error", format!("capture: serialize {command} failed: {e}")),
