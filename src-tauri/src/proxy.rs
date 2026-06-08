@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 use crate::cert::CaFiles;
-use crate::decode::decrypt_response;
+use crate::decode::{decrypt_request, decrypt_response};
 
 #[derive(Clone)]
 pub struct SwHandler {
@@ -48,6 +48,13 @@ pub struct SwHandler {
     /// mirroring sw-exporter's `mergeStorage` flow. Shared across the per-
     /// connection clones of this handler, hence `Arc<Mutex<_>>`.
     profiles: Arc<Mutex<HashMap<i64, PathBuf>>>,
+    /// Decrypted gateway request paired with the next response on this same
+    /// connection (only populated under capture-all). Mirrors sw-exporter, which
+    /// buffers request+response and decrypts both in onResponseEnd; lets a capture
+    /// record the request that produced a response — e.g. which unit_master_id a
+    /// getUnitStats* answer is for (the monster id is in the request, never the
+    /// response).
+    pending_request: Option<serde_json::Value>,
 }
 
 impl SwHandler {
@@ -60,6 +67,7 @@ impl SwHandler {
             capture_all: env_capture_all(),
             hunt_ids: env_hunt_ids(),
             profiles: Arc::new(Mutex::new(HashMap::new())),
+            pending_request: None,
         }
     }
 
@@ -88,6 +96,21 @@ impl HttpHandler for SwHandler {
         req: Request<Body>,
     ) -> RequestOrResponse {
         self.is_gateway = req.uri().path().contains("/api/gateway_c2.php");
+        self.pending_request = None;
+        // Under capture-all, buffer + decrypt the request so the upcoming response
+        // capture can be paired with it (the monster a getUnitStats* answer is for
+        // lives in the request, not the response). The ORIGINAL bytes are forwarded
+        // unchanged — same length, so Content-Length stays valid.
+        if self.is_gateway && self.capture_all {
+            let (parts, body) = req.into_parts();
+            let bytes = match body.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(_) => return Request::from_parts(parts, Body::empty()).into(),
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            self.pending_request = decrypt_request(&self.key, &text).ok();
+            return Request::from_parts(parts, Body::from(Full::new(bytes))).into();
+        }
         req.into()
     }
 
@@ -294,6 +317,23 @@ impl SwHandler {
                 Err(e) => self.log("error", format!("capture: write {name} failed: {e}")),
             },
             Err(e) => self.log("error", format!("capture: serialize {command} failed: {e}")),
+        }
+        // Paired request, same `{ms}-{command}` prefix with a `.request` suffix, so
+        // a response that doesn't name its monster (getUnitStats*) can be matched to
+        // the request that does.
+        if let Some(req) = &self.pending_request {
+            let rname = format!("{ms}-{safe}.request.json");
+            match serde_json::to_vec_pretty(req) {
+                Ok(buf) => {
+                    if let Err(e) = std::fs::write(dir.join(&rname), buf) {
+                        self.log("error", format!("capture: write {rname} failed: {e}"));
+                    }
+                }
+                Err(e) => self.log(
+                    "error",
+                    format!("capture: serialize request {command} failed: {e}"),
+                ),
+            }
         }
     }
 

@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- Diagnostic capture (`SWEX_CAPTURE_ALL=1`) now also decrypts and saves the matching
+  `gateway_c2.php` **request** next to each response (`{ts}-{command}.request.json`). Some
+  responses don't identify their subject — e.g. `getUnitStatsRuneInfo` carries community rune
+  stats but the monster id is only in the request — so the pair is needed to attribute them.
+
 ### Fixed
 - The capture summary now reports the **total** rune count (free + equipped) instead of only
   the free/unequipped runes. The previous figure was misleadingly low — most runes are
